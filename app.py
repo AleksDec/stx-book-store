@@ -41,6 +41,12 @@ class Books(db.Model):
 db.create_all()
 
 
+# ------ Home ------
+@app.route("/")
+def home():
+    return '<h1>STX BookStore</h1>'
+
+
 # ------ Api Specification ------
 @app.route("/api_spec")
 def api_spec():
