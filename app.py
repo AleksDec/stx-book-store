@@ -1,5 +1,6 @@
 from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
+from flask_marshmallow import Marshmallow
 import requests
 import os
 from dotenv import load_dotenv
@@ -15,6 +16,8 @@ app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL_POSTGRESQL")
 # --- Optional silencing the deprecation warning in the console ---
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
+# --- Initializing Marshmallow ---
+ma = Marshmallow(app)
 
 # --- Enabling SQLAlchemy connection to a database by creating a model ---
 class Books(db.Model):
@@ -26,19 +29,30 @@ class Books(db.Model):
     published_year = db.Column(db.String(20), unique=False, nullable=False)
     thumbnail = db.Column(db.Text, unique=False, nullable=True)
 
-    def __repr__(self):
-        return (
-            f"<Books {self.title} {self.author} {self.published_year}  {self.acquired}>"
-        )
-
-    def convert_to_dict(self):
-        books_dictionary = {}
-        for column in self.__table__.columns:
-            books_dictionary[column.name] = getattr(self, column.name)
-        return books_dictionary
-
+    def __init__(self, external_id, title, authors, acquired, published_year, thumbnail):
+        self.external_id = external_id
+        self.title = title
+        self.authors = authors
+        self.acquired = acquired
+        self.published_year = published_year
+        self.thumbnail = thumbnail
 
 db.create_all()
+
+
+# ------ Generating marshmallow Schema from model using SQLAlchemySchema ------
+class BookSchema(ma.Schema):
+    class Meta:
+        fields = ("id", "external_id", "title", "authors", "acquired", "published_year", "thumbnail")
+# ------ Initializing Schema ------
+book_schema = BookSchema()
+books_schema = BookSchema(many=True)
+
+
+# ------ Dumping all Books and listing ids ------
+all_books = Books.query.all()
+all_books_dumped = books_schema.dump(all_books)
+all_books_ids = [record['id'] for record in books_schema.dump(all_books)]
 
 
 # ------ Home ------
@@ -54,100 +68,82 @@ def api_spec():
 
 
 # ------ Getting the list of books, filtering the results by title, author, publication year or the acquired state ------
-def filters_applied(count):
+filter_options_names = ["title", "authors", "acquired", "from", "to"]
 
-    searched_books_ids = []
+def filters():
 
-    query_title = request.args.get("title")
-    if query_title:
-        books = Books.query.filter(Books.title.contains(query_title)).all()
-        for book in books:
-            searched_books_ids.append(book.id)
+    intersection_ids = all_books_ids
 
-    query_authors = request.args.get("authors")
-    if query_authors:
-        books = Books.query.filter(Books.authors.contains(query_authors)).all()
-        for book in books:
-            searched_books_ids.append(book.id)
+    for arg in request.args:
+        filtered_ids = []
+        if arg not in filter_options_names[3:]:
+            for record in all_books_dumped:
+                if request.args.get(arg) in str(record[arg]).lower():
+                    filtered_ids.append(record['id'])
+        else:
+            if arg == "from":
+                for record in all_books_dumped:
+                    if int(record["published_year"].split("-")[0]) >= int(request.args.get("from")):
+                        filtered_ids.append(record['id'])
+            if arg == "to":
+                for record in all_books_dumped:
+                    if int(record["published_year"].split("-")[0]) <= int(request.args.get("to")):
+                        filtered_ids.append(record['id'])
 
-    query_acquired_state = request.args.get("acquired")
-    if query_acquired_state:
-        books = Books.query.filter(Books.acquired.contains(query_acquired_state)).all()
-        for book in books:
-            searched_books_ids.append(book.id)
+        intersection_ids = list(set(intersection_ids) & set(filtered_ids))
 
-    query_published_year_from = request.args.get("from")
-    query_published_year_to = request.args.get("to")
-
-    if query_published_year_from:
-        books_to_date_convert = [book.convert_to_dict() for book in Books.query.all()]
-        for book in books_to_date_convert:
-            book["published_year"] = int(book["published_year"].split("-")[0])
-            if book["published_year"] >= int(query_published_year_from):
-                searched_books_ids.append(book["id"])
-    if query_published_year_to:
-        books_to_date_convert = [book.convert_to_dict() for book in Books.query.all()]
-        for book in books_to_date_convert:
-            book["published_year"] = int(book["published_year"].split("-")[0])
-            if book["published_year"] < int(query_published_year_to):
-                searched_books_ids.append(book["id"])
-
-    if searched_books_ids:
-        dict_of_ids_counts = {item: searched_books_ids.count(item) for item in searched_books_ids}
-        ids_of_found_book = [k for k, v in dict_of_ids_counts.items() if int(v) == count]
-        Books.query.filter(Books.id.in_(ids_of_found_book)).all()
-        return jsonify(searched_books=[book.convert_to_dict() for book in Books.query.filter(Books.id.in_(ids_of_found_book)).all()])
-
-    else:
-        return jsonify(error={"Not Found": "There is no such position among the books."})
+    return intersection_ids
 
 
 # ------ Getting the list of books from the database ------
 @app.route("/books")
 def searched_book():
 
-    # --- Checking whether the proper filters were applied ---
-    filter_options = ["title", "authors", "acquired", "from", "to"]
-    if request.args:
-        count = len([arg for arg in request.args if arg in filter_options])
-        if count:
-            return filters_applied(count)
+    try:
+        args_list = [arg for arg in request.args]
+        if args_list:
+            if set(args_list).issubset(filter_options_names):
+                found_ids = filters()
+                found_books = [record for record in books_schema.dump(all_books) if record['id'] in found_ids]
+                return jsonify(found_books)
+            else:
+                return jsonify(error={"No such filter": f"Try one of these : {filter_options_names}"})
         else:
-            return jsonify(error={"No such filter": f"Try one of these : {filter_options}"})
+            return jsonify(books_schema.dump(all_books))
 
-    else:
-        all_books = db.session.query(Books).all()
-        return jsonify(all_books=[book.convert_to_dict() for book in all_books])
+    except Exception as e:
+        abort(404, error={"Exception": f"{e}"})
 
 
 # ------ Checking the details of the book based on the id ------
 @app.route("/books/<int:book_id>")
 def book_details(book_id):
 
-    # --- Gathering all the ids from the database ---
-    all_db_ids = db.session.scalars(db.session.query(Books.id)).all()
+    the_book = Books.query.get(book_id)
+    if the_book:
+        the_book_dumped = book_schema.dump(the_book)
+        return jsonify(the_book_dumped)
 
-    if book_id in all_db_ids:
-        the_book = Books.query.get(book_id)
-        return jsonify(the_book.convert_to_dict())
     else:
-        return jsonify(error={"No such id in the database": "Try onother one"})
+        abort(404, description="There is no such id in the database. Try another one.")
 
 
 # ------ Adding a new book ------
-@app.route("/books", methods=["GET", "POST"])
+@app.route("/books", methods=["POST"])
 def add_new():
 
     try:
-        new_book = Books(
-            title=request.args.get("title"),
-            authors=request.args.get("authors"),
-            acquired=bool(request.args.get("acquired")),
-            published_year=request.args.get("published_year"),
-        )
+        title = request.json["title"]
+        authors = request.json["authors"]
+        acquired = request.json["acquired"]
+        published_year = request.json["published_year"]
+        thumbnail = request.json["thumbnail"]
+
+        new_book = Books(title=title, authors=authors, acquired=acquired, published_year=published_year,
+                         thumbnail=thumbnail, external_id=None)
         db.session.add(new_book)
         db.session.commit()
-        return jsonify(new_book.convert_to_dict())
+        return book_schema.jsonify(new_book)
 
     except Exception as e:
         return jsonify(error={"Exception": f"{e}"})
@@ -157,36 +153,17 @@ def add_new():
 @app.route("/books/<int:book_id>", methods=["PATCH"])
 def edit(book_id):
 
-    # --- Gathering all the ids from the database ---
-    all_db_ids = db.session.scalars(db.session.query(Books.id)).all()
+    edit_options = ["title", "authors", "acquired", "external_id", "published_year", "thumbnail"]
 
     try:
-        if book_id in all_db_ids and request.args:
-            book_to_edit = Books.query.get(book_id)
-
-            for arg in request.args:
-                if arg == "title":
-                    book_to_edit.title = request.args.get(arg)
-                elif arg == "authors":
-                    book_to_edit.authors = request.args.get(arg)
-                elif arg == "acquired":
-                    book_to_edit.acquired = bool(request.args.get(arg))
-                elif arg == "external_id":
-                    book_to_edit.external_id = request.args.get(arg)
-                elif arg == "published_year":
-                    book_to_edit.published_year = request.args.get(arg)
-                elif arg == "thumbnail":
-                    book_to_edit.thumbnail = request.args.get(arg)
-                else:
-                    return jsonify(error={"No such condition in database": "Try one of these : title, authors, acquired, external_id, published_year, thumbnail"})
+        book_to_edit = Books.query.get(book_id)
+        for arg in request.args:
+            if arg in edit_options:
+                setattr(book_to_edit, arg, request.args[arg])
+            else:
+                return jsonify(error={"No such condition in database": "Try one of these : title, authors, acquired, external_id, published_year, thumbnail"})
             db.session.commit()
-            return jsonify(book_to_edit.convert_to_dict())
-
-        elif book_id in all_db_ids and not request.args:
-            return jsonify(error={"No condition specified": "Try one of these : title, authors, acquired, external_id, published_year, thumbnail"})
-
-        else:
-            return jsonify(error={"No such id in the database": "Try onother one"})
+            return book_schema.jsonify(book_to_edit)
 
     except Exception as e:
         return jsonify(error={"Exception": f"{e}"})
@@ -196,81 +173,74 @@ def edit(book_id):
 @app.route("/books/<int:book_id>", methods=["DELETE"])
 def remove(book_id):
 
-    # --- Gathering all the ids from the database ---
-    all_db_ids = db.session.scalars(db.session.query(Books.id)).all()
-
     try:
-        if book_id in all_db_ids:
-            book_to_delete = Books.query.get(book_id)
+        book_to_delete = Books.query.get(book_id)
+        if book_to_delete:
             db.session.delete(book_to_delete)
             db.session.commit()
             return jsonify(success={"Item removed": f"ID : {book_id}"})
 
         else:
-            return jsonify(error={"No such id in the database": "Try onother one"})
+            return jsonify(error={"No such id in the database": "Try another one"})
 
     except Exception as e:
         return jsonify(error={"Exception": f"{e}"})
 
 
 # ------ Import books into database using the publicly available Google API ------
-@app.route("/import", methods=["GET", "POST"])
+@app.route("/import", methods=["POST"])
 def import_items():
 
     try:
-        for arg in request.args:
-            if arg == "authors":
-                query_authors = request.args.get("authors")
-                response = requests.get(url=f"https://www.googleapis.com/books/v1/volumes?q={query_authors}+inauthor:{query_authors}&projection=lite")
-                data = response.json()
-                items = data["items"]
+        query_authors = request.json["authors"]
+        response = requests.get(url=f"https://www.googleapis.com/books/v1/volumes?q={query_authors}+inauthor:{query_authors}&projection=lite")
+        data = response.json()
+        items = data["items"]
 
-                number_of_imported_items = 0
+        number_of_imported_items = 0
 
-                for item in items:
-                    # --- Checking if the item has been not already inserted ---
-                    item_external_id = item["id"]
-                    book_with_external_id = (
-                        db.session.query(Books)
-                        .filter_by(external_id=item_external_id)
-                        .first()
-                    )
-                    if book_with_external_id:
-                        book_to_delete = book_with_external_id
-                        db.session.delete(book_to_delete)
-                        db.session.commit()
-                    # --- Converting a list of authors into a string ---
-                    list_of_authors = [author for author in item["volumeInfo"]["authors"]]
-                    list_of_authors_string = ",".join(list_of_authors)
+        for item in items:
+            # --- Checking if the item has been not already inserted ---
+            item_external_id = item["id"]
+            book_with_external_id = (
+                db.session.query(Books)
+                .filter_by(external_id=item_external_id)
+                .first()
+            )
+            if book_with_external_id:
+                book_to_delete = book_with_external_id
+                db.session.delete(book_to_delete)
+                db.session.commit()
+            # --- Converting a list of authors into a string ---
+            list_of_authors = [author for author in item["volumeInfo"]["authors"]]
+            list_of_authors_string = ",".join(list_of_authors)
 
-                    # --- Calculating a number od imported items ---
-                    number_of_imported_items += 1
+            # --- Calculating a number od imported items ---
+            number_of_imported_items += 1
 
-                    # --- Adding new position into the database ---
-                    new_book = Books(
-                        external_id=item["id"],
-                        title=item["volumeInfo"]["title"],
-                        authors=list_of_authors_string,
-                        acquired=False,
-                        published_year=item["volumeInfo"]["publishedDate"],
-                    )
-                    db.session.add(new_book)
-                    db.session.commit()
+            # --- Adding new position into the database ---
+            external_id=item["id"]
+            title=item["volumeInfo"]["title"]
+            authors=list_of_authors_string
+            acquired=False
+            published_year=item["volumeInfo"]["publishedDate"]
 
-                    # --- In some cases there is no 'imageLinks' ---
-                    if "imageLinks" in item["volumeInfo"]:
-                        new_book.thumbnail = item["volumeInfo"]["imageLinks"]["thumbnail"]
-                    db.session.add(new_book)
-                    db.session.commit()
-
-                return jsonify({"Imported": f"{number_of_imported_items}"})
-
+            # --- In some cases there is no 'imageLinks' ---
+            if "imageLinks" in item["volumeInfo"]:
+                thumbnail = item["volumeInfo"]["imageLinks"]["thumbnail"]
             else:
-                return jsonify(error={"Wrong condition": "Try 'authors'"})
+                thumbnail = None
+            new_book = Books(title=title, authors=authors, acquired=acquired, published_year=published_year,
+                                 thumbnail=thumbnail, external_id=external_id)
+            db.session.add(new_book)
+            db.session.commit()
+
+        return jsonify({"Imported": f"{number_of_imported_items}"})
+
 
     except Exception as e:
         return jsonify(error={"Exception": f"{e}"})
 
 
 if __name__ == "__main__":
-    app.run()
+    app.run(debug=True)
