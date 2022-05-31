@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, abort
 from flask_sqlalchemy import SQLAlchemy
 from flask_marshmallow import Marshmallow
 import requests
@@ -28,14 +28,6 @@ class Books(db.Model):
     acquired = db.Column(db.Boolean, unique=False, nullable=False)
     published_year = db.Column(db.String(20), unique=False, nullable=False)
     thumbnail = db.Column(db.Text, unique=False, nullable=True)
-
-    def __init__(self, external_id, title, authors, acquired, published_year, thumbnail):
-        self.external_id = external_id
-        self.title = title
-        self.authors = authors
-        self.acquired = acquired
-        self.published_year = published_year
-        self.thumbnail = thumbnail
 
 db.create_all()
 
